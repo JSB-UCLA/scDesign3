@@ -9,23 +9,23 @@
 #' @param assay_use A string which indicates the assay you will use in the sce.
 #' Default is 'counts'.
 #' @param input_data The input data, which is one of the output from \code{\link{construct_data}}.
-#' @param new_covariate A data.frame which contains covariates of targeted simulated data from \code{\link{construct_data}}.
+#' @param empirical_quantile Please only use it if you clearly know what will happen! A logic variable. If TRUE, DO NOT fit the copula and use the EMPIRICAL CDF values of the original data; it will make the simulated data fixed (no randomness). Default is FALSE. Only works if ncell is the same as your original data.
 #' @param marginal_list A list of fitted regression models from \code{\link{fit_marginal}}.
 #' @param family_use A string or a vector of strings of the marginal distribution. Must be one of 'poisson', 'nb', 'zip', 'zinb' or 'gaussian'.
-#' @param copula A string of the copula choice. Must be one of 'gaussian' or 'vine'. Default is 'vine'.
+#' @param copula A string of the copula choice. Must be one of 'gaussian' or 'vine'. Default is 'gaussian'. Note that vine copula may have better modeling of high-dimensions, but can be very slow when features are >1000.
 #' @param DT A logic variable. If TRUE, perform the distributional transformation
 #' to make the discrete data 'continuous'. This is useful for discrete distributions (e.g., Poisson, NB).
 #' Default is TRUE. Note that for continuous data (e.g., Gaussian), DT does not make sense and should be set as FALSE.
 #' @param pseudo_obs A logic variable. If TRUE, use the empirical quantiles instead of theoretical quantiles for fitting copula.
 #' Default is FALSE.
 #' @param epsilon A numeric variable for preventing the transformed quantiles to collapse to 0 or 1.
-#' @param family_set A string or a string vector of the bivarate copula families. Default is c("gaussian", "indep").
+#' @param family_set A string or a string vector of the bivariate copula families. Default is c("gaussian", "indep").
 #' @param important_feature A string or vector which indicates whether a gene will be used in correlation estimation or not. If this is a string, then
-#' this string must be "auto", which indicates that the genes will be automatically selected based on the proportion of zero expression across cells
+#' this string must be either "all" (using all genes) or "auto", which indicates that the genes will be automatically selected based on the proportion of zero expression across cells
 #' for each gene. Gene with zero proportion greater than 0.8 will be excluded form gene-gene correlation estimation. If this is a vector, then this should
 #' be a logical vector with length equal to the number of genes in \code{sce}. \code{TRUE} in the logical vector means the corresponding gene will be included in
 #' gene-gene correlation estimation and \code{FALSE} in the logical vector means the corresponding gene will be excluded from the gene-gene correlation estimation.
-#' The default value for is a vector with length equal to the number of inputted genes and every value equals to \code{TRUE}.
+#' The default value for is "all".
 #' @param n_cores An integer. The number of cores to use.
 #' @param parallelization A string indicating the specific parallelization function to use.
 #' Must be one of 'mcmapply', 'bpmapply', or 'pbmcmapply', which corresponds to the parallelization function in the package
@@ -67,11 +67,9 @@
 #'   family_use = c(rep("nb", 5), rep("zip", 5)),
 #'   copula = "vine",
 #'   n_cores = 1,
-#'   new_covariate = NULL,
 #'   input_data = my_data$dat
 #'   )
-#'
-#'
+#'   
 #' @import mclust
 #' @import gamlss
 #'
@@ -80,126 +78,201 @@
 fit_copula <- function(sce,
                        assay_use,
                        input_data,
-                       new_covariate = NULL,
+                       empirical_quantile = FALSE,
                        marginal_list,
                        family_use,
-                       copula = 'vine',
+                       copula = 'gaussian',
                        DT = TRUE,
                        pseudo_obs = FALSE,
                        epsilon = 1e-6,
                        family_set = c("gaussian", "indep"),
-                       important_feature = rep(TRUE, dim(sce)[1]),
+                       important_feature = "all",
                        n_cores,
                        parallelization = "mcmapply",
                        BPPARAM = NULL) {
-  # convert count matrix
-  if (copula == "gaussian") {
-    message("Convert Residuals to Multivariate Gaussian")
-    newmat <- convert_n(
-      sce = sce,
-      assay_use = assay_use,
-      marginal_list = marginal_list,
-      DT = DT,
-      pseudo_obs = pseudo_obs,
-      n_cores = n_cores,
-      family_use = family_use,
-      epsilon = epsilon,
-      parallelization = parallelization
-    )
-    message("Converting End")
-  } else{
-    message("Convert Residuals to Uniform")
-    newmat <- convert_u(
-      sce = sce,
-      assay_use = assay_use,
-      marginal_list = marginal_list,
-      DT = DT,
-      pseudo_obs = pseudo_obs,
-      family_use = family_use,
-      n_cores = n_cores,
-      epsilon = epsilon,
-      parallelization = parallelization
-    )
-    message("Converting End")
+
+  if(empirical_quantile == TRUE) {
+      message("Use the empirical quantile matrices from the original data; do not fit copula. This will make the result FIXED.")
   }
-
-  ## select important genes
-  if(is.vector(important_feature) & length(important_feature) !=1){
-    if(length(important_feature) != dim(sce)[1] | !methods::is(important_feature,"logical")){
-      stop("The important_feature should either be 'auto' or a logical vector with the length equals to the number of genes in the input data")
-    }
-  }else{
-    if(important_feature=="auto"){
-      gene_zero_prop <- apply(SingleCellExperiment::counts(sce), 1, function(y){
-        sum(y < 1e-5) / dim(sce)[2]
-      })
-      important_feature = gene_zero_prop < 0.8 ## default zero proportion in scDesign2
-      names(important_feature) <- rownames(sce)
-    }else{
-      stop("The important_feature should either be 'auto' or a logical vector with the length equals to the number of genes in the input data")
-    }
+  
+  if(important_feature == "all") {
+    important_feature <- rep(TRUE, dim(sce)[1])
   }
-
-
+  
+  marginals <- lapply(marginal_list, function(x){x$fit})
+  # find gene whose marginal is fitted
+  qc_gene_idx <- which(!is.na(marginals))
+  if(length(family_use) != 1){
+    family_use <- family_use[qc_gene_idx]
+  }
   group_index <- unique(input_data$corr_group)
-  corr_group <- as.data.frame(input_data$corr_group)
-  colnames(corr_group) <- "corr_group"
-  ngene <- dim(sce)[1]
-  if (is.null(new_covariate)) {
-    new_corr_group <- NULL
-  } else{
-    new_corr_group <- as.data.frame(new_covariate$corr_group)
-    colnames(new_corr_group) <- "corr_group"
-  }
   ind <- group_index[1] == "ind"
-  newmvn.list <-
-    lapply(group_index, function(x,
-                                 sce,
-                                 newmat,
-                                 corr_group,
-                                 new_corr_group,
-                                 ind,
-                                 n_cores,
-                                 important_feature) {
-      message(paste0("Copula group ", x, " starts"))
-      curr_index <- which(corr_group[, 1] == x)
-      if (is.null(new_covariate)) {
-        curr_ncell <- length(curr_index)
-        curr_ncell_idx <- curr_index
-      } else{
-        curr_ncell <- length(which(new_corr_group[, 1] == x))
-        curr_ncell_idx <-
-          paste0("Cell", which(new_corr_group[, 1] == x))
+  if(ind) {
+    copula.aic <- 0
+    copula.bic <- 0
+    marginal.aic <- sum(sapply(marginals[qc_gene_idx], stats::AIC))
+    marginal.bic <- sum(sapply(marginals[qc_gene_idx], stats::BIC))
+    model_aic <- c(marginal.aic, copula.aic, marginal.aic + copula.aic)
+    names(model_aic) <- c("aic.marginal", "aic.copula", "aic.total")
+    model_bic <- c(marginal.bic, copula.bic, marginal.bic + copula.bic)
+    names(model_bic) <- c("bic.marginal", "bic.copula", "bic.total")
+    copula_list <- NULL
+    return(
+      list(
+        #new_mvu = new_mvu,
+        model_aic = model_aic,
+        model_bic = model_bic,
+        copula_list = copula_list,
+        important_feature = important_feature
+      )
+    )
+  }
+
+  if(empirical_quantile == TRUE) {
+    ###
+    if(is.vector(important_feature) & methods::is(important_feature,"logical")){
+      if(length(important_feature) != dim(sce)[1]){
+        stop("The important_feature should either be 'auto' or a logical vector with the length equals to the number of genes in the input data")
       }
-      if (copula == "gaussian") {
-        #message(paste0("Group ", group_index, " Start"))
-        curr_mat <- newmat[curr_index, , drop = FALSE]
-        #message("Cal MVN")
-        cor.mat <- cal_cor(
-          curr_mat,
-          important_feature = important_feature,
-          if.sparse = FALSE,
-          lambda = 0.05,
-          tol = 1e-8,
-          ind = ind
-        )
-        #message("Sample MVN")
-        #new_mvu <- sampleMVN(n = curr_ncell,
-        #                     Sigma = cor.mat)
-        #message("MVN Sampling End")
-        #rownames(new_mvu) <- curr_ncell_idx
+    }else{
+      if(important_feature=="auto"){
+        gene_zero_prop <- apply(as.matrix(SummarizedExperiment::assay(sce, assay_use)), 1, function(y){
+          sum(y < 1e-5) / dim(sce)[2]
+        })
+        important_feature = gene_zero_prop < 0.8 ## default zero proportion in scDesign2
+        names(important_feature) <- rownames(sce)
+      }else{
+        stop("The important_feature should either be 'auto' or a logical vector with the length equals to the number of genes in the input data")
+      }
+    }
+    
+    important_feature <- important_feature[qc_gene_idx]
+    corr_group <- as.data.frame(input_data$corr_group)
+    colnames(corr_group) <- "corr_group"
 
-        #message("Cal AIC/BIC Start")
-        model_aic <- cal_aic(norm.mat = newmat,
-                             cor.mat = cor.mat,
-                             ind = ind)
-        model_bic <- cal_bic(norm.mat = newmat,
-                             cor.mat = cor.mat,
-                             ind = ind)
-        #message("Cal AIC/BIC End")
-
-      } else if (copula == "vine") {
-        if (!ind) {
+    
+    newmvq.list <- lapply(group_index, function(x,
+                                                sce,
+                                                corr_group) {
+      message(paste0("Empirical quantile group ", x, " starts"))
+      sce <- sce[important_feature, ]
+      curr_index <- which(corr_group[, 1] == x)
+      
+      newmat <- SummarizedExperiment::assay(sce[, curr_index], assay_use)
+      newmat <- t(as.matrix(newmat))
+      
+      newmvq <- rvinecopulib::pseudo_obs(newmat)
+      newmvq
+    }, sce = sce,
+    corr_group = corr_group)
+      
+    newmvq <- do.call("rbind", newmvq.list)
+    newmvq <- newmvq[colnames(sce),] 
+    
+    return(list(model_aic = 0,
+           model_bic = 0,
+           quantile_mat = newmvq,
+           important_feature = important_feature))
+    ###
+  } else {
+    if (copula == "gaussian") {
+      message("Convert Residuals to Multivariate Gaussian")
+      newmat <- convert_n(
+        sce = sce[qc_gene_idx,],
+        assay_use = assay_use,
+        marginal_list = marginal_list[qc_gene_idx],
+        data = input_data,
+        DT = DT,
+        pseudo_obs = pseudo_obs,
+        n_cores = n_cores,
+        family_use = family_use,
+        epsilon = epsilon,
+        parallelization = parallelization,
+        BPPARAM = BPPARAM
+      )
+      message("Converting End")
+    } else{
+      message("Convert Residuals to Uniform")
+      newmat <- convert_u(
+        sce = sce[qc_gene_idx,],
+        assay_use = assay_use,
+        marginal_list = marginal_list[qc_gene_idx],
+        data = input_data,
+        DT = DT,
+        pseudo_obs = pseudo_obs,
+        family_use = family_use,
+        n_cores = n_cores,
+        epsilon = epsilon,
+        parallelization = parallelization,
+        BPPARAM = BPPARAM
+      )
+      message("Converting End")
+    }
+    
+    ## select important genes
+    if(is.vector(important_feature) & methods::is(important_feature,"logical")){
+      if(length(important_feature) != dim(sce)[1]){
+        stop("The important_feature should either be 'auto' or a logical vector with the length equals to the number of genes in the input data")
+      }
+    }else{
+      if(important_feature=="auto"){
+        gene_zero_prop <- apply(as.matrix(SummarizedExperiment::assay(sce, assay_use)), 1, function(y){
+          sum(y < 1e-5) / dim(sce)[2]
+        })
+        important_feature = gene_zero_prop < 0.8 ## default zero proportion in scDesign2
+        names(important_feature) <- rownames(sce)
+      }else{
+        stop("The important_feature should either be 'auto' or a logical vector with the length equals to the number of genes in the input data")
+      }
+    }
+    
+    important_feature <- important_feature[qc_gene_idx]
+    
+    
+    corr_group <- as.data.frame(input_data$corr_group)
+    colnames(corr_group) <- "corr_group"
+   
+    
+    newmvn.list <-
+      lapply(group_index, function(x,
+                                   sce,
+                                   newmat,
+                                   corr_group,
+                                   ind,
+                                   n_cores,
+                                   important_feature) {
+        message(paste0("Copula group ", x, " starts"))
+        curr_index <- which(corr_group[, 1] == x)
+       
+        if (copula == "gaussian") {
+          #message(paste0("Group ", group_index, " Start"))
+          curr_mat <- newmat[curr_index, , drop = FALSE]
+          #message("Cal MVN")
+          cor.mat <- cal_cor(
+            curr_mat,
+            important_feature = important_feature,
+            if.sparse = FALSE,
+            lambda = 0.05,
+            tol = 1e-8,
+            ind = ind
+          )
+          
+          #message("Sample MVN")
+          #new_mvu <- sampleMVN(n = curr_ncell,
+          #                     Sigma = cor.mat)
+          #message("MVN Sampling End")
+          #rownames(new_mvu) <- curr_ncell_idx
+          
+          #message("Cal AIC/BIC Start")
+          model_aic <- cal_aic(norm.mat = newmat,
+                               cor.mat = cor.mat,
+                               ind = ind)
+          model_bic <- cal_bic(norm.mat = newmat,
+                               cor.mat = cor.mat,
+                               ind = ind)
+          #message("Cal AIC/BIC End")
+          
+        } else if (copula == "vine") {
           message("Vine Copula Estimation Starts")
           start <- Sys.time()
           curr_mat <- newmat[curr_index, , drop = FALSE]
@@ -227,67 +300,62 @@ fit_copula <- function(sce,
           # } else{
           #   new_mvu <- NULL
           # }
-
-
           model_aic <- stats::AIC(vine.fit)
           model_bic <- stats::BIC(vine.fit)
           cor.mat <- vine.fit
+        } else{
+          stop("Copula must be one of 'vine' or 'gaussian'")
         }
-        else {
-          #new_mvu <-
-          #  matrix(data = stats::runif(curr_ncell * ngene),
-          #         nrow = curr_ncell)
-          #rownames(new_mvu) <- curr_ncell_idx
-          model_aic <- 0
-          model_bic <- 0
-          cor.mat <- NULL
-        }
-      } else{
-        stop("Copula must be one of 'vine' or 'gaussian'")
-      }
-      return(
-        list(
-          #new_mvu = new_mvu,
-          model_aic = model_aic,
-          model_bic = model_bic,
-          cor.mat = cor.mat
+        return(
+          list(
+            #new_mvu = new_mvu,
+            model_aic = model_aic,
+            model_bic = model_bic,
+            cor.mat = cor.mat
+          )
         )
+      }, sce = sce, 
+      newmat = newmat, 
+      ind = ind, 
+      n_cores = n_cores, 
+      corr_group = corr_group,
+      important_feature = important_feature)
+    
+    #newmvn <-
+    #  do.call(rbind, lapply(newmvn.list, function(x)
+    #    x$new_mvu))
+    
+    copula.aic <- sum(sapply(newmvn.list, function(x)
+      x$model_aic))
+    marginal.aic <- sum(sapply(marginals[qc_gene_idx], stats::AIC))
+    
+    copula.bic <- sum(sapply(newmvn.list, function(x)
+      x$model_bic))
+    marginal.bic <- sum(sapply(marginals[qc_gene_idx], stats::BIC))
+    
+    model_aic <- c(marginal.aic, copula.aic, marginal.aic + copula.aic)
+    names(model_aic) <- c("aic.marginal", "aic.copula", "aic.total")
+    
+    model_bic <- c(marginal.bic, copula.bic, marginal.bic + copula.bic)
+    names(model_bic) <- c("bic.marginal", "bic.copula", "bic.total")
+    
+    copula_list <- lapply(newmvn.list, function(x)
+      x$cor.mat)
+    names(copula_list) <- group_index
+    
+    
+    #new_mvu <- as.data.frame(newmvn)
+    
+    return(
+      list(
+        #new_mvu = new_mvu,
+        model_aic = model_aic,
+        model_bic = model_bic,
+        copula_list = copula_list,
+        important_feature = important_feature
       )
-    }, sce = sce, newmat = newmat, ind = ind, n_cores = n_cores, corr_group = corr_group, new_corr_group = new_corr_group, important_feature = important_feature)
-
-  #newmvn <-
-  #  do.call(rbind, lapply(newmvn.list, function(x)
-  #    x$new_mvu))
-
-  copula.aic <- sum(sapply(newmvn.list, function(x)
-    x$model_aic))
-  marginal.aic <- sum(sapply(marginal_list, stats::AIC))
-
-  copula.bic <- sum(sapply(newmvn.list, function(x)
-    x$model_bic))
-  marginal.bic <- sum(sapply(marginal_list, stats::BIC))
-
-  model_aic <- c(marginal.aic, copula.aic, marginal.aic + copula.aic)
-  names(model_aic) <- c("aic.marginal", "aic.copula", "aic.total")
-
-  model_bic <- c(marginal.bic, copula.bic, marginal.bic + copula.bic)
-  names(model_bic) <- c("bic.marginal", "bic.copula", "bic.total")
-
-  copula_list <- lapply(newmvn.list, function(x)
-    x$cor.mat)
-  names(copula_list) <- group_index
-
-  #new_mvu <- as.data.frame(newmvn)
-
-  return(
-    list(
-      #new_mvu = new_mvu,
-      model_aic = model_aic,
-      model_bic = model_bic,
-      copula_list = copula_list,
-      important_feature = important_feature
     )
-  )
+  }
 }
 
 
@@ -307,132 +375,88 @@ cal_cor <- function(norm.mat,
     rownames(cor.mat) <- colnames(norm.mat)
     colnames(cor.mat) <- colnames(norm.mat)
     important.mat <- norm.mat[,which(important_feature)]
-    important_cor.mat <- Rfast::cora(important.mat)
+    important_cor.mat <- corrlation(important.mat)
     #s_d <- apply(norm.mat, 2, stats::sd)
-    s_d <- Rfast::colVars(important.mat, std = TRUE, na.rm = TRUE)
+    s_d <- matrixStats::colSds(important.mat,na.rm = TRUE)
     if (any(0 == s_d)) {
-      important.mat[is.na(important.mat)] <- 0
+      important_cor.mat[is.na(important_cor.mat)] <- 0
     }
     cor.mat[rownames(important_cor.mat), colnames(important_cor.mat)] <- important_cor.mat
   }
 
   n <- dim(cor.mat)[1]
 
-  if (if.sparse) {
-    ifposd <- matrixcalc::is.positive.definite(cor.mat, tol = tol)
-    if (!ifposd) {
-      warning("Cor matrix is not positive defnite! Add tol to the diagnol.")
-      #diag(cor.mat) <- diag(cor.mat) + tol
-    }
-    ## Call spcov
-    lambda_matrix <- matrix(rep(1, n ^ 2), nrow = n) * lambda
-    diag(lambda_matrix) <- 0
-    scor <- spcov::spcov(
-      cor.mat,
-      cor.mat,
-      lambda = lambda_matrix,
-      step.size  = 100,
-      trace = 1,
-      n.inner.steps = 200,
-      thr.inner = tol
-    )
-    cor.mat <- scor$Sigma
-  }
+  ### We currently gave up this because the sparse corr calclulation is too slow.
+  # if (if.sparse) {
+  #   ifposd <- matrixcalc::is.positive.definite(cor.mat, tol = tol)
+  #   if (!ifposd) {
+  #     warning("Cor matrix is not positive defnite! Add tol to the diagnol.")
+  #     #diag(cor.mat) <- diag(cor.mat) + tol
+  #   }
+  #   ## Call spcov
+  #   lambda_matrix <- matrix(rep(1, n ^ 2), nrow = n) * lambda
+  #   diag(lambda_matrix) <- 0
+  #   scor <- spcov::spcov(
+  #     cor.mat,
+  #     cor.mat,
+  #     lambda = lambda_matrix,
+  #     step.size  = 100,
+  #     trace = 1,
+  #     n.inner.steps = 200,
+  #     thr.inner = tol
+  #   )
+  #   cor.mat <- scor$Sigma
+  # }
 
   cor.mat
 }
-
-### Sample MVN based on cor
-sampleMVN <- function(n,
-                      Sigma) {
-  mvnrv <-
-    mvtnorm::rmvnorm(n, mean = rep(0, dim(Sigma)[1]), sigma = Sigma)
-  mvnrvq <- apply(mvnrv, 2, stats::pnorm)
-
-  return(mvnrvq)
-}
-
-## fix integer overflow issue when # of gene* # of cell is too larger in rnorm(n * ncol(sigma))
-rmvnorm <- function(n, mean = rep(0, nrow(sigma)), sigma = diag(length(mean)),
-                    method=c("eigen", "svd", "chol"), pre0.9_9994 = FALSE, checkSymmetry = TRUE)
-{
-  if (checkSymmetry && !isSymmetric(sigma, tol = sqrt(.Machine$double.eps),
-                                    check.attributes = FALSE)) {
-    stop("sigma must be a symmetric matrix")
-  }
-  if (length(mean) != nrow(sigma))
-    stop("mean and sigma have non-conforming size")
-
-  method <- match.arg(method)
-
-  R <- if(method == "eigen") {
-    ev <- eigen(sigma, symmetric = TRUE)
-    if (!all(ev$values >= -sqrt(.Machine$double.eps) * abs(ev$values[1]))){
-      warning("sigma is numerically not positive semidefinite")
-    }
-    ## ev$vectors %*% diag(sqrt(ev$values), length(ev$values)) %*% t(ev$vectors)
-    ## faster for large  nrow(sigma):
-    t(ev$vectors %*% (t(ev$vectors) * sqrt(pmax(ev$values, 0))))
-  }
-  else if(method == "svd"){
-    s. <- svd(sigma)
-    if (!all(s.$d >= -sqrt(.Machine$double.eps) * abs(s.$d[1]))){
-      warning("sigma is numerically not positive semidefinite")
-    }
-    t(s.$v %*% (t(s.$u) * sqrt(pmax(s.$d, 0))))
-  }
-  else if(method == "chol"){
-    R <- chol(sigma, pivot = TRUE)
-    R[, order(attr(R, "pivot"))]
-  }
-
-  retval <- matrix(stats::rnorm(as.double(n) * ncol(sigma)), nrow = n, byrow = !pre0.9_9994) %*%  R
-  retval <- sweep(retval, 2, mean, "+")
-  colnames(retval) <- names(mean)
-  retval
-}
-
 
 ## Convert marginal distributions to standard normals.
 convert_n <- function(sce,
                       assay_use,
                       marginal_list,
+                      data,
                       DT = TRUE,
                       pseudo_obs = FALSE,
                       epsilon = 1e-6,
                       family_use,
                       n_cores,
-                      parallelization) {
+                      parallelization,
+                      BPPARAM) {
   ## Extract count matrix
   count_mat <-
-    t(as.matrix(SummarizedExperiment::assay(sce, assay_use)))
-
+      t(as.matrix(SummarizedExperiment::assay(sce, assay_use)))
+  removed_cell_list <- lapply(marginal_list, function(x){x$removed_cell})
+  marginal_list <- lapply(marginal_list, function(x){x$fit})
   # n cell
   ncell <- dim(count_mat)[1]
 
 
   mat_function <- function(x, y) {
     fit <- marginal_list[[x]]
-
+    removed_cell <- removed_cell_list[[x]]
+    if(length(removed_cell) > 0 && !any(is.na(removed_cell))){
+      data<- data[-removed_cell,]
+    }
     if (methods::is(fit, "gamlss")) {
-      mean_vec <- stats::predict(fit, type = "response", what = "mu")
+      mean_vec <- stats::predict(fit, type = "response", what = "mu", data = data)
       if (y == "poisson" | y == "binomial") {
         theta_vec <- rep(NA, length(mean_vec))
       } else if (y == "gaussian") {
         theta_vec <-
-          stats::predict(fit, type = "response", what = "sigma") # called the theta_vec but actually used as sigma_vec for Gaussian
+          stats::predict(fit, type = "response", what = "sigma", data = data) # called the theta_vec but actually used as sigma_vec for Gaussian
       } else if (y == "nb") {
         theta_vec <-
-          1 / stats::predict(fit, type = "response", what = "sigma")
+          1 / stats::predict(fit, type = "response", what = "sigma", data = data)
         #theta_vec[theta_vec < 1e-3] <- 1e-3
       } else if (y == "zip") {
         theta_vec <- rep(NA, length(mean_vec))
         zero_vec <-
-          stats::predict(fit, type = "response", what = "sigma")
+          stats::predict(fit, type = "response", what = "sigma", data = data)
       } else if (y == "zinb") {
-        theta_vec <- stats::predict(fit, type = "response", what = "sigma")
+        theta_vec <- stats::predict(fit, type = "response", what = "sigma", data = data)
         zero_vec <-
-          stats::predict(fit, type = "response", what = "nu")
+          stats::predict(fit, type = "response", what = "nu", data = data)
       } else {
         stop("Distribution of gamlss must be one of gaussian, poisson, nb, zip or zinb!")
       }
@@ -461,7 +485,7 @@ convert_n <- function(sce,
     ## Mean for Each Cell
 
 
-    Y <- count_mat[, x]
+    Y <- count_mat[names(mean_vec), x]
 
 
     ## Frame
@@ -548,6 +572,13 @@ convert_n <- function(sce,
       r <- pvec
     }
 
+    if(length(r) < dim(sce)[2]){
+      new_r <- rep(1, dim(sce)[2])
+      names(new_r) <- colnames(sce)
+      new_r[names(r)] <- r
+      r <- new_r
+    }
+
     ## Avoid Inf
     idx_adjust <- which(1 - r < epsilon)
     r[idx_adjust] <- r[idx_adjust] - epsilon
@@ -580,7 +611,7 @@ convert_n <- function(sce,
     BPPARAM$workers <- n_cores
     mat <- paraFunc(mat_function, x = seq_len(dim(sce)[1]), y = family_use, SIMPLIFY = TRUE, BPPARAM = BPPARAM)
   }else{
-    mat <- paraFunc(mat_function, x = seq_len(dim(sce)[1]), y = family_use, SIMPLIFY = TRUE)
+    mat <- paraFunc(mat_function, x = seq_len(dim(sce)[1]), y = family_use, SIMPLIFY = TRUE, mc.cores = n_cores)
   }
   colnames(mat) <- rownames(sce)
   rownames(mat) <- colnames(sce)
@@ -599,41 +630,49 @@ convert_n <- function(sce,
 convert_u <- function(sce,
                       assay_use,
                       marginal_list,
+                      data,
                       DT = TRUE,
                       pseudo_obs = FALSE,
                       epsilon = 1e-6,
                       n_cores,
                       family_use,
-                      parallelization) {
+                      parallelization,
+                      BPPARAM) {
   ## Extract count matrix
   count_mat <-
-    t(as.matrix(SummarizedExperiment::assay(sce, assay_use)))
+      t(as.matrix(SummarizedExperiment::assay(sce, assay_use)))
+  removed_cell_list <- lapply(marginal_list, function(x){x$removed_cell})
+  marginal_list <- lapply(marginal_list, function(x){x$fit})
+
 
   # n cell
   ncell <- dim(count_mat)[1]
 
   mat_function <- function(x, y) {
     fit <- marginal_list[[x]]
-
+    removed_cell <- removed_cell_list[[x]]
+    if(length(removed_cell) > 0 && !any(is.na(removed_cell))){
+      data<- data[-removed_cell,]
+    }
     if (methods::is(fit, "gamlss")) {
-      mean_vec <- stats::predict(fit, type = "response", what = "mu")
+      mean_vec <- stats::predict(fit, type = "response", what = "mu", data = data) #
       if (y == "poisson" | y == "binomial") {
         theta_vec <- rep(NA, length(mean_vec))
       } else if (y == "gaussian") {
         theta_vec <-
-          stats::predict(fit, type = "response", what = "sigma") # called the theta_vec but actually used as sigma_vec for Gaussian
+          stats::predict(fit, type = "response", what = "sigma", data = data) # called the theta_vec but actually used as sigma_vec for Gaussian
       } else if (y == "nb") {
         theta_vec <-
-          1 / stats::predict(fit, type = "response", what = "sigma")
+          1 / stats::predict(fit, type = "response", what = "sigma", data = data) #
         #theta_vec[theta_vec < 1e-3] <- 1e-3
       } else if (y == "zip") {
         theta_vec <- rep(NA, length(mean_vec))
         zero_vec <-
-          stats::predict(fit, type = "response", what = "sigma")
+          stats::predict(fit, type = "response", what = "sigma", data = data)
       } else if (y == "zinb") {
-        theta_vec <- stats::predict(fit, type = "response", what = "sigma")
+        theta_vec <- stats::predict(fit, type = "response", what = "sigma", data = data)
         zero_vec <-
-          stats::predict(fit, type = "response", what = "nu")
+          stats::predict(fit, type = "response", what = "nu", data = data)
       } else {
         stop("Distribution of gamlss must be one of gaussian, binomial, poisson, nb, zip or zinb!")
       }
@@ -660,7 +699,7 @@ convert_u <- function(sce,
     ## Mean for Each Cell
 
 
-    Y <- count_mat[, x]
+    Y <- count_mat[names(mean_vec), x]
 
 
     ## Frame
@@ -745,6 +784,13 @@ convert_u <- function(sce,
       r <- u1 * v + u2 * (1 - v)
     } else {
       r <- pvec
+    }
+
+    if(length(r) < dim(sce)[2]){
+      new_r <- rep(1, dim(sce)[2])
+      names(new_r) <- colnames(sce)
+      new_r[names(r)] <- r
+      r <- new_r
     }
 
     ## Avoid Inf
@@ -835,4 +881,66 @@ cal_bic <- function(norm.mat,
   }
 
   copula.bic
+}
+
+## Similar to the cora function from "Rfast" but uses different functions to calculate column means and row sums.
+corrlation <- function(x) {
+  mat <- t(x) - matrixStats::colMeans2(x)
+  mat <- mat / sqrt(matrixStats::rowSums2(mat^2))
+  tcrossprod(mat)
+}
+
+### Sample MVN based on cor
+sampleMVN <- function(n,
+                      Sigma, n_cores = n_cores, fastmvn = fastmvn) {
+  if(fastmvn) {
+    mvnrv <- mvnfast::rmvn(n, mu = rep(0, dim(Sigma)[1]), sigma = Sigma, ncores = n_cores)
+  } else {
+    mvnrv <-
+      rmvnorm(n, mean = rep(0, dim(Sigma)[1]), sigma = Sigma, checkSymmetry = FALSE, method="eigen")
+  }
+  mvnrvq <- apply(mvnrv, 2, stats::pnorm)
+
+  return(mvnrvq)
+}
+
+## fix integer overflow issue when # of gene* # of cell is too larger in rnorm(n * ncol(sigma))
+## This function comes from package Mvnorm.
+rmvnorm <- function(n, mean = rep(0, nrow(sigma)), sigma = diag(length(mean)),
+                    method=c("eigen", "svd", "chol"), pre0.9_9994 = FALSE, checkSymmetry = TRUE)
+{
+  if (checkSymmetry && !isSymmetric(sigma, tol = sqrt(.Machine$double.eps),
+                                    check.attributes = FALSE)) {
+    stop("sigma must be a symmetric matrix")
+  }
+  if (length(mean) != nrow(sigma))
+    stop("mean and sigma have non-conforming size")
+
+  method <- match.arg(method)
+
+  R <- if(method == "eigen") {
+    ev <- eigen(sigma, symmetric = TRUE)
+    if (!all(ev$values >= -sqrt(.Machine$double.eps) * abs(ev$values[1]))){
+      warning("sigma is numerically not positive semidefinite")
+    }
+    ## ev$vectors %*% diag(sqrt(ev$values), length(ev$values)) %*% t(ev$vectors)
+    ## faster for large  nrow(sigma):
+    t(ev$vectors %*% (t(ev$vectors) * sqrt(pmax(ev$values, 0))))
+  }
+  else if(method == "svd"){
+    s. <- svd(sigma)
+    if (!all(s.$d >= -sqrt(.Machine$double.eps) * abs(s.$d[1]))){
+      warning("sigma is numerically not positive semidefinite")
+    }
+    t(s.$v %*% (t(s.$u) * sqrt(pmax(s.$d, 0))))
+  }
+  else if(method == "chol"){
+    R <- chol(sigma, pivot = TRUE)
+    R[, order(attr(R, "pivot"))]
+  }
+
+  retval <- matrix(stats::rnorm(as.double(n) * ncol(sigma)), nrow = n, byrow = !pre0.9_9994) %*%  R
+  retval <- sweep(retval, 2, mean, "+")
+  colnames(retval) <- names(mean)
+  retval
 }

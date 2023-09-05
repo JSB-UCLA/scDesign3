@@ -8,15 +8,15 @@ fit_copula(
   sce,
   assay_use,
   input_data,
-  new_covariate = NULL,
+  empirical_quantile = FALSE,
   marginal_list,
   family_use,
-  copula = "vine",
+  copula = "gaussian",
   DT = TRUE,
   pseudo_obs = FALSE,
   epsilon = 1e-06,
   family_set = c("gaussian", "indep"),
-  important_feature = rep(TRUE, dim(sce)[1]),
+  important_feature = "all",
   n_cores,
   parallelization = "mcmapply",
   BPPARAM = NULL
@@ -30,13 +30,13 @@ Default is 'counts'.}
 
 \item{input_data}{The input data, which is one of the output from \code{\link{construct_data}}.}
 
-\item{new_covariate}{A data.frame which contains covariates of targeted simulated data from \code{\link{construct_data}}.}
+\item{empirical_quantile}{Please only use it if you clearly know what will happen! A logic variable. If TRUE, DO NOT fit the copula and use the EMPIRICAL CDF values of the original data; it will make the simulated data fixed (no randomness). Default is FALSE. Only works if ncell is the same as your original data.}
 
 \item{marginal_list}{A list of fitted regression models from \code{\link{fit_marginal}}.}
 
 \item{family_use}{A string or a vector of strings of the marginal distribution. Must be one of 'poisson', 'nb', 'zip', 'zinb' or 'gaussian'.}
 
-\item{copula}{A string of the copula choice. Must be one of 'gaussian' or 'vine'. Default is 'vine'.}
+\item{copula}{A string of the copula choice. Must be one of 'gaussian' or 'vine'. Default is 'gaussian'. Note that vine copula may have better modeling of high-dimensions, but can be very slow when features are >1000.}
 
 \item{DT}{A logic variable. If TRUE, perform the distributional transformation
 to make the discrete data 'continuous'. This is useful for discrete distributions (e.g., Poisson, NB).
@@ -47,14 +47,14 @@ Default is FALSE.}
 
 \item{epsilon}{A numeric variable for preventing the transformed quantiles to collapse to 0 or 1.}
 
-\item{family_set}{A string or a string vector of the bivarate copula families. Default is c("gaussian", "indep").}
+\item{family_set}{A string or a string vector of the bivariate copula families. Default is c("gaussian", "indep").}
 
 \item{important_feature}{A string or vector which indicates whether a gene will be used in correlation estimation or not. If this is a string, then
-this string must be "auto", which indicates that the genes will be automatically selected based on the proportion of zero expression across cells
+this string must be either "all" (using all genes) or "auto", which indicates that the genes will be automatically selected based on the proportion of zero expression across cells
 for each gene. Gene with zero proportion greater than 0.8 will be excluded form gene-gene correlation estimation. If this is a vector, then this should
 be a logical vector with length equal to the number of genes in \code{sce}. \code{TRUE} in the logical vector means the corresponding gene will be included in
 gene-gene correlation estimation and \code{FALSE} in the logical vector means the corresponding gene will be excluded from the gene-gene correlation estimation.
-The default value for is a vector with length equal to the number of inputted genes and every value equals to \code{TRUE}.}
+The default value for is "all".}
 
 \item{n_cores}{An integer. The number of cores to use.}
 
@@ -108,9 +108,7 @@ and fit the copula model on the residuals.
   family_use = c(rep("nb", 5), rep("zip", 5)),
   copula = "vine",
   n_cores = 1,
-  new_covariate = NULL,
   input_data = my_data$dat
   )
-
-
+  
 }

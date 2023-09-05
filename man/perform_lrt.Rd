@@ -19,7 +19,7 @@ A data.frame of the LRT result.
 }
 \details{
 The function takes two lists of marginal models (by default, the first list is the alternative and the second is the null)
-from \code{\link{fit_marginal}}. Note that LRT only makes sense for NESTED models.
+from \code{\link{fit_marginal}}. Note that LRT only makes sense for NESTED models. This can be quite tricky if you use penalized-splines (e.g., for trajectory data).
 }
 \examples{
 data(example_sce)
@@ -60,6 +60,8 @@ my_marginal2 <- fit_marginal(
   n_cores = 1,
   usebam = FALSE
 )
-my_pvalue <- perform_lrt(my_marginal2, my_marginal1)
+my_fit1 <- lapply(my_marginal1, function(x)x$fit)
+my_fit2 <- lapply(my_marginal2, function(x)x$fit)
+my_pvalue <- perform_lrt(my_fit2, my_fit1)
 
 }

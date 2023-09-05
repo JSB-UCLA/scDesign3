@@ -28,6 +28,8 @@
 #'   \item{\code{count_mat}}{The expression matrix}
 #'   \item{\code{dat}}{The original covariate matrix}
 #'   \item{\code{newCovariate}}{The simulated new covariate matrix, is NULL if the parameter ncell is default}
+#'   \item{\code{filtered_gene}}{The genes that are excluded in the marginal and copula fitting 
+#' steps because these genes only express in less than two cells.}
 #' }
 #' @examples
 #'   data(example_sce)
@@ -53,10 +55,17 @@ construct_data <- function(sce,
                           corr_by,
                           parallelization = "mcmapply",
                           BPPARAM = NULL) {
+
+  ## check unique cell names and gene names
+  if(length(unique(colnames(sce))) != dim(sce)[2]){
+    stop("Please make sure your inputted SingleCellExperiment object does not have duplicate cell names")
+  }
+  if(length(unique(rownames(sce))) != dim(sce)[1]){
+    stop("Please make sure your inputted SingleCellExperiment object does not have duplicate gene names")
+  }
   ## Extract expression matrix
   count_mat <-
-    t(as.matrix(SummarizedExperiment::assay(sce, assay_use)))
-
+      t(as.matrix(SummarizedExperiment::assay(sce, assay_use)))
   ## Extract col data
   coldata_mat <- data.frame(SummarizedExperiment::colData(sce))
 
@@ -68,7 +77,7 @@ construct_data <- function(sce,
     dat <- as.data.frame(coldata_mat[, primary_covariate, drop = FALSE])
   }
 
-  if(!is.null(dat[, celltype])) {
+  if(!is.null(celltype)) {
     dat[, celltype] <- as.factor(dat[, celltype])}
 
   # ## Extract pseudotime / cell type / spatial
@@ -116,7 +125,7 @@ construct_data <- function(sce,
   if(ncell != dim(dat)[1]){
     newCovariate <- as.data.frame(simuCovariateMat(dat,ncell, parallelization, BPPARAM))
   }else{
-    newCovariate <- NULL
+    newCovariate <- dat
   }
 
   # identify groups
@@ -128,12 +137,12 @@ construct_data <- function(sce,
       corr_group <- rep(1, n_cell)
       corr_group2 <- rep(1, dim(newCovariate)[1])
     } else if (group[1] == "ind"){
-      corr_group <- rep(NULL, n_cell)
-      corr_group2 <- rep(NULL, dim(newCovariate)[1])
+      corr_group <- rep("ind", n_cell)
+      corr_group2 <- rep("ind", dim(newCovariate)[1])
     } else if (group[1] == "pseudotime" | length(group) > 1) {
       ## For continuous pseudotime, discretize it
       corr_group <- SummarizedExperiment::colData(sce)[, group]
-      mclust_mod <- mclust::Mclust(corr_group, G = 1:5)
+      mclust_mod <- mclust::Mclust(corr_group, G = seq_len(5))
       corr_group <- mclust_mod$classification
 
       corr_group2 <- newCovariate[, group]
@@ -152,7 +161,7 @@ construct_data <- function(sce,
     }else if (group[1] == "pseudotime" | length(group) > 1) {
       ## For continuous pseudotime, discretize it
       corr_group <- SummarizedExperiment::colData(sce)[, group]
-      mclust_mod <- mclust::Mclust(corr_group, G = 1:5)
+      mclust_mod <- mclust::Mclust(corr_group, G = seq_len(5))
 
       corr_group <- mclust_mod$classification
 
@@ -161,8 +170,16 @@ construct_data <- function(sce,
     }
   }
   dat$corr_group <- corr_group
-
-  return(list(count_mat = count_mat, dat = dat, newCovariate = newCovariate))
+  
+  qc <- apply(count_mat, 2, function(x){
+    return(length(which(x < 1e-5)) > length(x) - 2)
+  })
+  if(length(which(qc)) == 0){
+    filtered_gene <- NULL
+  }else{
+    filtered_gene <- names(which(qc)) 
+  }
+  return(list(count_mat = count_mat, dat = dat, newCovariate = newCovariate, filtered_gene = filtered_gene))
 }
 
 
@@ -225,7 +242,10 @@ simuCovariateMat <- function(covariate_mat,
         df <- dplyr::select(df, -"discrete_group")
         df_factor <- dplyr::select_if(df, is.factor)
         df_onerow <- as.data.frame(df_factor[1, ])
+        colnames(df_onerow) <- colnames(df_factor)
         new_dat <- as.data.frame(df_onerow[rep(1, n), ])
+        colnames(new_dat) <- colnames(df_onerow)
+        new_dat
       }
       if(parallelization == "bpmapply"){
           new_dat_list <- paraFunc(FUN = dat_function, df = df_list, n = group_n_new, BPPARAM = BPPARAM, SIMPLIFY = FALSE)

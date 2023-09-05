@@ -6,17 +6,20 @@
 \usage{
 extract_para(
   sce,
+  assay_use = "counts",
   marginal_list,
   n_cores,
   family_use,
   new_covariate,
   parallelization = "mcmapply",
   BPPARAM = NULL,
-  data = NULL
+  data
 )
 }
 \arguments{
 \item{sce}{A \code{SingleCellExperiment} object.}
+
+\item{assay_use}{A string which indicates the assay you will use in the sce. Default is 'counts'.}
 
 \item{marginal_list}{A list of fitted regression models from \code{\link{fit_marginal}} for each gene in sce.}
 
@@ -81,7 +84,6 @@ marginal models from \code{\link{fit_marginal}}.
   family_use = c(rep("nb", 5), rep("zip", 5)),
   copula = "vine",
   n_cores = 1,
-  new_covariate = NULL,
   input_data = my_data$dat
   )
   my_para <- extract_para(
@@ -89,7 +91,7 @@ marginal models from \code{\link{fit_marginal}}.
     marginal_list = my_marginal,
     n_cores = 1,
     family_use = c(rep("nb", 5), rep("zip", 5)),
-    new_covariate = NULL,
+    new_covariate = my_data$new_covariate,
     data = my_data$dat
   )
 

@@ -3,7 +3,7 @@
 #' \code{perform_lrt} performs the likelihood ratio test to compare two list of marginal models.
 #'
 #' The function takes two lists of marginal models (by default, the first list is the alternative and the second is the null)
-#' from \code{\link{fit_marginal}}. Note that LRT only makes sense for NESTED models.
+#' from \code{\link{fit_marginal}}. Note that LRT only makes sense for NESTED models. This can be quite tricky if you use penalized-splines (e.g., for trajectory data).
 #'
 #' @param alter_marginal A list of marginal models from the alternative hypothesis.
 #' @param null_marginal A list of marginal models from the null hypothesis. It must be strictly nested in the alternative model.
@@ -48,7 +48,9 @@
 #'   n_cores = 1,
 #'   usebam = FALSE
 #' )
-#' my_pvalue <- perform_lrt(my_marginal2, my_marginal1)
+#' my_fit1 <- lapply(my_marginal1, function(x)x$fit)
+#' my_fit2 <- lapply(my_marginal2, function(x)x$fit)
+#' my_pvalue <- perform_lrt(my_fit2, my_fit1)
 #'
 #' @export perform_lrt
 
